@@ -34,7 +34,7 @@ Follow these steps to set up the environment and install necessary dependencies:
 
 ```bash
 # 1. Create the environment
-conda env create -n ProtTale -f ProtT3_environment.yml
+conda env create -n ProtTale -f ProtTale_environment.yml
 
 # 2. Activate the environment
 conda activate ProtTale
