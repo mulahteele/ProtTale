@@ -1,0 +1,2 @@
+# ProtTale
+Protein function generation
