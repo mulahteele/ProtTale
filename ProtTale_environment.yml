@@ -1,17 +1,17 @@
-# ProtT3 Environment Configuration
+# ProtTale Environment Configuration
 # 
 # Installation Instructions:
 # 1. Create the environment:
-#    conda env create -n ProtT3_backup -f ProtT3_environment.yml
+#    conda env create -n ProtTale -f ProtTale_environment.yml
 #
 # 2. Activate the environment:
-#    conda activate ProtT3_backup
+#    conda activate ProtTale
 #
 # 3. Install packages with dependency conflicts:
 #   pip install salesforce-lavis==1.0.2 --no-deps
 #   SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL=True pip install opendelta==0.3.2
 #
-name: ProtT3
+name: ProtTale
 channels:
   - pytorch
   - nvidia
