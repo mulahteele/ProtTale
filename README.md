@@ -7,7 +7,7 @@ ProtTale bridges the gap between protein language models (like ESMC) and scienti
 ---
 
 ## Resources
-* **Model Checkpoints:** [Link to OneDrive](#)
+* **Model Checkpoints:** [[Link to OneDrive](https://emory-my.sharepoint.com/:u:/g/personal/tli349_emory_edu/IQAAr7rYHIPzRZHnJ1aUHateAZf5okYEXXTZ7-7UsHPUvUQ?e=zbOdbw)]
 * **Testing Data:** [Link to OneDrive](#)
 
 
