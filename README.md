@@ -146,7 +146,7 @@ Single-sequence / batch inference uses [predict_single.py](predict_single.py). I
 
 ```bash
 python predict_single.py \
-  --ckpt all_checkpoints/ProtTale_reliability_ft/best_val_reliability_class1_f1.ckpt \
+  --ckpt checkpoint.ckpt \
   --seq MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG
 ```
 
