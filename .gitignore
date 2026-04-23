@@ -1,0 +1,46 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Project artifacts
+log/
+logs/
+all_checkpoints/
+wandb/
+outputs/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Data (tracked separately / not published with code)
+data/
