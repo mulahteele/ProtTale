@@ -8,8 +8,8 @@ Usage:
 
 Outputs (per sequence) to stdout and optionally to --out_json:
     - prediction: generated Swiss-Prot function text
-    - reliability: predicted class value in {-1.0, 0.0, 0.5, 1.0}
-    - reliability_prob_class1: P(reliability == 1.0)
+    - reliability: predicted class in {0.0, 1.0} (binary: 1.0 = reliable)
+    - reliability_pos_prob: probability of the positive class (r = 1.0)
 """
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -25,7 +25,7 @@ from data_provider.stage2_dm import InferenceCollater
 
 
 def build_args(ckpt_path):
-    """Hyperparameters must match those used to train the checkpoint (see run.sh)."""
+    """Hyperparameters must match those used to train the checkpoint (see train.sh)."""
     return Namespace(
         # Encoder (PLM)
         plm_model="esmc_300m",
@@ -82,6 +82,7 @@ def build_args(ckpt_path):
         max_epochs=1,
         filename="predict_single",
         seed=42,
+        reliability_binary=True,
     )
 
 
@@ -159,7 +160,7 @@ def run(args):
         r_tensor = r_tensor.to(device)
 
         samples = {"prot_batch": prot_tokens, "prompt_batch": prompt_tokens, "reliability": r_tensor}
-        pred_texts, r_pred, _conf, _emb, r_prob_class1 = blip2.generate(
+        pred_texts, r_pred, _conf, _emb, r_probs = blip2.generate(
             samples,
             do_sample=model_args.do_sample,
             num_beams=model_args.num_beams,
@@ -168,22 +169,23 @@ def run(args):
         )
 
         r_pred_list = r_pred.cpu().tolist() if torch.is_tensor(r_pred) else list(r_pred)
-        r_prob1_list = r_prob_class1.cpu().tolist() if torch.is_tensor(r_prob_class1) else list(r_prob_class1)
+        r_probs_list = r_probs.cpu().tolist() if torch.is_tensor(r_probs) else list(r_probs)
 
         for i, s in enumerate(chunk):
-            results.append({
+            row = {
                 "sequence": s,
                 "prediction": pred_texts[i],
                 "reliability": round(float(r_pred_list[i]), 4),
-                "reliability_prob_class1": round(float(r_prob1_list[i]), 4),
-            })
+                "reliability_pos_prob": round(float(r_probs_list[i][1]), 4),
+            }
+            results.append(row)
 
     for r in results:
         print("=" * 60)
         print(f"sequence (len={len(r['sequence'])}): {r['sequence'][:80]}{'...' if len(r['sequence']) > 80 else ''}")
-        print(f"prediction             : {r['prediction']}")
-        print(f"reliability            : {r['reliability']}")
-        print(f"reliability_prob_class1: {r['reliability_prob_class1']}")
+        print(f"prediction  : {r['prediction']}")
+        print(f"reliability        : {r['reliability']}")
+        print(f"reliability_pos_prob: {r['reliability_pos_prob']}")
 
     if args.out_json:
         with open(args.out_json, "w", encoding="utf-8") as f:
@@ -195,8 +197,8 @@ def run(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=str,
-                    default="all_checkpoints/ProtTale_reliability_ft/best_val_reliability_class1_f1.ckpt",
-                    help="Path to checkpoint (.ckpt).")
+                    default="all_checkpoints/ProtTale_binary_reliability_ft/best_val_reliability_pos_f1.ckpt",
+                    help="Path to checkpoint (.ckpt). Must be a binary reliability head checkpoint.")
     ap.add_argument("--seq", type=str, default="", help="Single protein sequence (amino acids).")
     ap.add_argument("--seq_file", type=str, default="", help="Text file with one sequence per line.")
     ap.add_argument("--fasta", type=str, default="", help="FASTA file.")

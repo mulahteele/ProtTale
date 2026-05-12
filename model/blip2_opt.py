@@ -5,6 +5,7 @@
  For full license text, see the LICENSE file in the repo root or https://opensource.org/licenses/BSD-3-Clause
 """
 import logging
+import os
 import torch
 import numpy as np
 import torch.nn as nn
@@ -52,6 +53,64 @@ def _class_to_r_value(class_indices):
     """Convert class indices back to reliability float values."""
     classes = torch.tensor(RELIABILITY_CLASSES, dtype=torch.float32, device=class_indices.device)
     return classes[class_indices]
+
+
+def _r_value_to_binary_class(r_tensor):
+    """Binary mapping: 1 if r ~= 1.0 (positive class), else 0."""
+    pos = torch.isclose(r_tensor, torch.tensor(1.0, device=r_tensor.device, dtype=r_tensor.dtype), atol=1e-4)
+    return pos.long()
+
+
+def _scan_r_counts(json_path):
+    """Return (raw_counts_4class, total). raw_counts indexed by RELIABILITY_VAL_TO_IDX."""
+    import json as _json
+    counts = torch.zeros(RELIABILITY_NUM_CLASSES, dtype=torch.float32)
+    if not json_path or not os.path.isfile(json_path):
+        return counts, 0
+    total = 0
+    with open(json_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = _json.loads(line)
+            r = float(row[2])
+            total += 1
+            for cls_val, idx in RELIABILITY_VAL_TO_IDX.items():
+                if abs(r - cls_val) < 1e-4:
+                    counts[idx] += 1
+                    break
+    return counts, total
+
+
+def _inverse_freq_from_counts(counts):
+    """Inverse-frequency weights w_k = N / (K_present * n_k), mean weight over
+    present classes = 1. Empty classes get weight 0."""
+    if counts.sum() == 0:
+        return None
+    nonzero = counts > 0
+    weights = torch.zeros_like(counts)
+    weights[nonzero] = counts.sum() / (nonzero.sum().float() * counts[nonzero])
+    return weights
+
+
+def _compute_inverse_freq_class_weights(json_path):
+    """4-class inverse-frequency weights from JSON-lines file."""
+    counts, total = _scan_r_counts(json_path)
+    if total == 0:
+        return None
+    return _inverse_freq_from_counts(counts)
+
+
+def _compute_binary_inverse_freq_class_weights(json_path):
+    """Binary inverse-frequency weights. Index 0 = negative (r != 1), index 1 = positive (r == 1)."""
+    counts, total = _scan_r_counts(json_path)
+    if total == 0:
+        return None
+    pos = counts[RELIABILITY_VAL_TO_IDX[1.0]]
+    neg = counts.sum() - pos
+    binary_counts = torch.tensor([neg, pos], dtype=torch.float32)
+    return _inverse_freq_from_counts(binary_counts)
 
 
 def mask_by_len(input, lens, fill_value=0):
@@ -179,12 +238,31 @@ class Blip2OPT(Blip2Base):
         ).input_ids[0]
         self.opt_proj = nn.Linear(self.Qformer.config.hidden_size, self.llm_model.config.hidden_size)
 
+        # Reliability head can be either 4-class ({-1, 0, 0.5, 1}) or binary (positive=r==1, else negative).
+        self.reliability_binary = bool(getattr(args, 'reliability_binary', False))
+        head_out_dim = 2 if self.reliability_binary else RELIABILITY_NUM_CLASSES
         reliability_input_dim = self.Qformer.config.hidden_size + self.plm.num_features
         self.reliability_head = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(reliability_input_dim, RELIABILITY_NUM_CLASSES),
+            nn.Linear(reliability_input_dim, head_out_dim),
         )
         self.reliability_head = self.reliability_head.to(torch.float32)
+
+        # Class weights for reliability cross-entropy. Computed from the reliability
+        # finetune JSON when train_reliability_head_only is set; uniform otherwise.
+        cw = None
+        if getattr(args, 'train_reliability_head_only', False):
+            json_path = getattr(args, 'reliability_finetune_data', '')
+            if self.reliability_binary:
+                cw = _compute_binary_inverse_freq_class_weights(json_path)
+            else:
+                cw = _compute_inverse_freq_class_weights(json_path)
+            if cw is not None:
+                mode_tag = 'binary' if self.reliability_binary else '4-class'
+                logging.info(f"reliability {mode_tag} inverse-freq class weights: {cw.tolist()}")
+        if cw is None:
+            cw = torch.ones(head_out_dim, dtype=torch.float32)
+        self.register_buffer('reliability_class_weights', cw)
 
     def load_llm(self, llm_model, load_4bit=False, enable_gradient_checkpointing=True):
         llm_tokenizer = AutoTokenizer.from_pretrained(llm_model, use_fast=False, padding_side='right')
@@ -371,10 +449,14 @@ class Blip2OPT(Blip2Base):
             qf = qformer_feats.to(device=head_param.device, dtype=head_param.dtype)
             pf = plm_pooled.to(device=head_param.device, dtype=head_param.dtype)
             r_input = torch.cat([qf, pf], dim=-1)
-            r_logits = self.reliability_head(r_input)  # [B, NUM_CLASSES]
+            r_logits = self.reliability_head(r_input)  # [B, NUM_CLASSES] or [B, 2]
             r_target = r_tensor.to(device=r_logits.device, dtype=r_logits.dtype).view(-1)
-            r_class_target = _r_value_to_class(r_target).to(r_logits.device)
-            r_loss = nn.functional.cross_entropy(r_logits, r_class_target)
+            if self.reliability_binary:
+                r_class_target = _r_value_to_binary_class(r_target).to(r_logits.device)
+            else:
+                r_class_target = _r_value_to_class(r_target).to(r_logits.device)
+            cw = self.reliability_class_weights.to(device=r_logits.device, dtype=r_logits.dtype)
+            r_loss = nn.functional.cross_entropy(r_logits, r_class_target, weight=cw)
 
         if return_pred:
             with torch.no_grad():
@@ -479,15 +561,18 @@ class Blip2OPT(Blip2Base):
                 qf = qformer_feats.to(device=head_param.device, dtype=head_param.dtype)
                 pf = plm_pooled.to(device=head_param.device, dtype=head_param.dtype)
                 r_input = torch.cat([qf, pf], dim=-1)
-                r_logits = self.reliability_head(r_input)  # [B, NUM_CLASSES]
-                r_pred = _class_to_r_value(r_logits.argmax(dim=-1))  # predicted class value
-                r_probs = torch.softmax(r_logits, dim=-1)
-                r_prob_class1 = r_probs[:, RELIABILITY_VAL_TO_IDX[1.0]]  # P(reliability=1.0)
+                r_logits = self.reliability_head(r_input)  # [B, K]
+                r_probs = torch.softmax(r_logits, dim=-1)  # [B, K]
+                pred_idx = r_logits.argmax(dim=-1)
+                if self.reliability_binary:
+                    r_pred = pred_idx.to(torch.float32)  # 0.0 (neg) or 1.0 (pos)
+                else:
+                    r_pred = _class_to_r_value(pred_idx)
             # LLM last layer embedding: mean over sequence (protein + prompt + generated)
             llm_last_mean = last_hidden.to(torch.float32).mean(dim=1).detach().to(torch.float16).cpu()
         else:
-            r_pred = torch.ones(B_gen, device=device) * 0.5
-            r_prob_class1 = torch.ones(B_gen, device=device) * 0.0
+            r_pred = torch.ones(B_gen, device=device) * (0.0 if self.reliability_binary else 0.5)
+            r_probs = torch.zeros(B_gen, 2 if self.reliability_binary else RELIABILITY_NUM_CLASSES, device=device)
             # LLM last layer embedding: forward on input only (protein + prompt), then mean over sequence
             with torch.no_grad():
                 outputs = self.llm_model(
@@ -512,4 +597,4 @@ class Blip2OPT(Blip2Base):
             "llm_last_fp16": llm_last_mean
         }
 
-        return texts, r_pred, conf, emb_out, r_prob_class1
+        return texts, r_pred, conf, emb_out, r_probs

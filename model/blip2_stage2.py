@@ -364,7 +364,7 @@ class Blip2Stage2(pl.LightningModule):
                 return
             prot_batch, prompt_batch, r_tensor, target_dict = batch
             samples = {'prot_batch': prot_batch, 'prompt_batch': prompt_batch, 'reliability': r_tensor}
-            predictions, r_pred, avg_conf, emb_out, r_prob_class1 = self.blip2.generate(
+            predictions, r_pred, avg_conf, emb_out, r_probs = self.blip2.generate(
                 samples,
                 do_sample=self.do_sample,
                 num_beams=self.num_beams,
@@ -374,7 +374,13 @@ class Blip2Stage2(pl.LightningModule):
             target_dict['predictions'] = predictions
             target_dict['confidences'] = [round(float(x), 4) for x in avg_conf]
             target_dict['reliability'] = [round(float(x), 4) for x in r_pred]
-            target_dict['reliability_prob_class1'] = [round(float(x), 4) for x in r_prob_class1]
+            if getattr(self.blip2, 'reliability_binary', False):
+                # r_probs shape [B, 2]: index 0 = negative, 1 = positive (r==1).
+                target_dict['reliability_prob_class1'] = [round(float(x), 4) for x in r_probs[:, 1]]
+            else:
+                from model.blip2_opt import RELIABILITY_VAL_TO_IDX
+                for cls_val, idx in RELIABILITY_VAL_TO_IDX.items():
+                    target_dict[f'reliability_prob_class{cls_val}'] = [round(float(x), 4) for x in r_probs[:, idx]]
             B = len(predictions)
             target_dict['plm_mean_fp16'] = [emb_out['plm_mean_fp16'][i].clone() for i in range(B)]
             target_dict['qformer_feats_fp16'] = [emb_out['qformer_feats_fp16'][i].clone() for i in range(B)]
@@ -551,22 +557,67 @@ class Blip2Stage2(pl.LightningModule):
                         return
                     pred_arr = np.array(all_r_pred, dtype=np.float64)
                     gt_arr = np.array(all_r_gt, dtype=np.float64)
+                    binary_mode = getattr(self.blip2, 'reliability_binary', False)
+                    if binary_mode:
+                        gt_pos = np.isclose(gt_arr, 1.0, atol=1e-4)
+                        pred_pos = np.isclose(pred_arr, 1.0, atol=1e-4)
+                        acc = float((gt_pos == pred_pos).mean())
+                        self.log(f"{log_prefix}/reliability_accuracy", acc, sync_dist=False)
+                        f1_per_class = {}
+                        per_class_lines = []
+                        for tag, gt_is, pred_is in [("pos", gt_pos, pred_pos), ("neg", ~gt_pos, ~pred_pos)]:
+                            tp = int((gt_is & pred_is).sum())
+                            fp = int((~gt_is & pred_is).sum())
+                            fn = int((gt_is & ~pred_is).sum())
+                            n_cls = int(gt_is.sum())
+                            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                            f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+                            self.log(f"{log_prefix}/reliability_{tag}_recall", recall, sync_dist=False)
+                            self.log(f"{log_prefix}/reliability_{tag}_precision", precision, sync_dist=False)
+                            self.log(f"{log_prefix}/reliability_{tag}_f1", f1, sync_dist=False)
+                            if n_cls > 0:
+                                f1_per_class[tag] = f1
+                            per_class_lines.append(f"{tag}: P={precision:.3f} R={recall:.3f} F1={f1:.3f} n={n_cls}")
+                        macro_f1 = float(np.mean(list(f1_per_class.values()))) if f1_per_class else 0.0
+                        self.log(f"{log_prefix}/reliability_macro_f1", macro_f1, sync_dist=False)
+                        if self.global_rank == 0:
+                            print(f'[{display_name}] Reliability (binary) accuracy: {acc:.4f} (n={len(pred_arr)}), pos-F1: {f1_per_class.get("pos", 0.0):.4f}, macro-F1: {macro_f1:.4f}')
+                            for line in per_class_lines:
+                                print(f'  {line}')
+                        return
                     acc = float(np.isclose(pred_arr, gt_arr, atol=1e-4).mean())
                     self.log(f"{log_prefix}/reliability_accuracy", acc, sync_dist=False)
-                    gt_is_class1 = np.isclose(gt_arr, 1.0, atol=1e-4)
-                    pred_is_class1 = np.isclose(pred_arr, 1.0, atol=1e-4)
-                    tp = int((gt_is_class1 & pred_is_class1).sum())
-                    fp = int((~gt_is_class1 & pred_is_class1).sum())
-                    fn = int((gt_is_class1 & ~pred_is_class1).sum())
-                    class1_n = int(gt_is_class1.sum())
-                    class1_recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-                    class1_precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-                    class1_f1 = (2 * class1_precision * class1_recall / (class1_precision + class1_recall)) if (class1_precision + class1_recall) > 0 else 0.0
-                    self.log(f"{log_prefix}/reliability_class1_accuracy", class1_recall, sync_dist=False)
-                    self.log(f"{log_prefix}/reliability_class1_precision", class1_precision, sync_dist=False)
-                    self.log(f"{log_prefix}/reliability_class1_f1", class1_f1, sync_dist=False)
+                    # Per-class precision/recall/F1 + macro-F1 over classes present in GT.
+                    class_values = [-1.0, 0.0, 0.5, 1.0]
+                    f1_per_class = {}
+                    per_class_lines = []
+                    for cls_val in class_values:
+                        gt_is = np.isclose(gt_arr, cls_val, atol=1e-4)
+                        pred_is = np.isclose(pred_arr, cls_val, atol=1e-4)
+                        tp = int((gt_is & pred_is).sum())
+                        fp = int((~gt_is & pred_is).sum())
+                        fn = int((gt_is & ~pred_is).sum())
+                        n_cls = int(gt_is.sum())
+                        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+                        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+                        tag = f"class{cls_val}".replace('-', 'neg').replace('.', 'p')
+                        self.log(f"{log_prefix}/reliability_{tag}_recall", recall, sync_dist=False)
+                        self.log(f"{log_prefix}/reliability_{tag}_precision", precision, sync_dist=False)
+                        self.log(f"{log_prefix}/reliability_{tag}_f1", f1, sync_dist=False)
+                        if n_cls > 0:
+                            f1_per_class[cls_val] = f1
+                        per_class_lines.append(f"{cls_val}: P={precision:.3f} R={recall:.3f} F1={f1:.3f} n={n_cls}")
+                    macro_f1 = float(np.mean(list(f1_per_class.values()))) if f1_per_class else 0.0
+                    self.log(f"{log_prefix}/reliability_macro_f1", macro_f1, sync_dist=False)
+                    # Backward-compat: keep old class-1 metric names.
+                    cls1_f1 = f1_per_class.get(1.0, 0.0)
+                    self.log(f"{log_prefix}/reliability_class1_f1", cls1_f1, sync_dist=False)
                     if self.global_rank == 0:
-                        print(f'[{display_name}] Reliability accuracy: {acc:.4f} (n={len(pred_arr)}), class-1 recall: {class1_recall:.4f}, precision: {class1_precision:.4f}, F1: {class1_f1:.4f} (n_class1={class1_n})')
+                        print(f'[{display_name}] Reliability accuracy: {acc:.4f} (n={len(pred_arr)}), macro-F1: {macro_f1:.4f}')
+                        for line in per_class_lines:
+                            print(f'  {line}')
 
                 # Validation set (dataloader_idx 0)
                 _compute_accuracy(val_go_gathered, 0, "val", "Validation set")

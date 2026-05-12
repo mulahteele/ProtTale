@@ -126,7 +126,7 @@ bash run.sh reliability_train
 
 If the JSONs already exist, phase A is skipped automatically; delete them to force re-inference.
 
-Output checkpoint: `all_checkpoints/${RELIABILITY_FILENAME}/best_val_reliability_class1_f1.ckpt`. This is the final checkpoint used for downstream inference.
+Output checkpoint: `all_checkpoints/${RELIABILITY_FILENAME}/checkpoint.ckpt`. This is the final checkpoint used for downstream inference.
 
 ### Step 4 — (Optional) Stage 2 evaluation
 
@@ -146,7 +146,7 @@ Single-sequence / batch inference uses [predict_single.py](predict_single.py). I
 
 ```bash
 python predict_single.py \
-  --ckpt all_checkpoints/ProtTale_reliability_ft/best_val_reliability_class1_f1.ckpt \
+  --ckpt all_checkpoints/ProtTale_binary_reliability_ft/checkpoint.ckpt \
   --seq MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG
 ```
 
@@ -177,11 +177,11 @@ Each line in `results.jsonl`:
   "sequence": "MKTVRQER...",
   "prediction": "Catalyzes ...",
   "reliability": 1.0,
-  "reliability_prob_class1": 0.9123
+  "reliability_pos_prob": 0.9123
 }
 ```
 
-`reliability` is the predicted class in `{-1.0, 0.0, 0.5, 1.0}`, and `reliability_prob_class1` is the probability that the generated text is fully reliable (class `1.0`).
+`reliability` is the predicted binary class in `{0.0, 1.0}` (`1.0` = reliable, `0.0` = unreliable), and `reliability_pos_prob` is the model's probability for the positive (reliable) class.
 
 The generation hyperparameters (`num_beams`, `max_inference_len`, LoRA sizes, etc.) must match the checkpoint; see `build_args()` in [predict_single.py](predict_single.py) and keep them in sync with [configs/default.sh](configs/default.sh).
 

@@ -92,13 +92,22 @@ def main(args):
     callbacks = []
     ckpt_dirpath = "all_checkpoints/" + args.filename + "/"
     if args.train_reliability_head_only:
-        # Reliability head training: save best by val class-1 (r=1.0) F1 (max)
-        callbacks.append(plc.ModelCheckpoint(dirpath=ckpt_dirpath,
-                                             filename='best_val_reliability_class1_f1',
-                                             monitor='val/reliability_class1_f1',
-                                             mode='max',
-                                             save_top_k=1,
-                                             save_on_train_epoch_end=False))
+        if getattr(args, 'reliability_binary', False):
+            # Binary head: save best by val positive-class F1 (max).
+            callbacks.append(plc.ModelCheckpoint(dirpath=ckpt_dirpath,
+                                                 filename='best_val_reliability_pos_f1',
+                                                 monitor='val/reliability_pos_f1',
+                                                 mode='max',
+                                                 save_top_k=1,
+                                                 save_on_train_epoch_end=False))
+        else:
+            # 4-class head: save best by val macro-F1 (max).
+            callbacks.append(plc.ModelCheckpoint(dirpath=ckpt_dirpath,
+                                                 filename='best_val_reliability_macro_f1',
+                                                 monitor='val/reliability_macro_f1',
+                                                 mode='max',
+                                                 save_top_k=1,
+                                                 save_on_train_epoch_end=False))
     else:
         # Normal Stage2: save best by val/bleu2 (max)
         callbacks.append(plc.ModelCheckpoint(dirpath=ckpt_dirpath,
@@ -169,6 +178,7 @@ def get_args():
     parser.add_argument('--train_reliability_head_only', action='store_true', default=False, help='Freeze all except reliability head; train on file from --inference_on_training_data step')
     parser.add_argument('--reliability_finetune_data', type=str, default='', help='Required for --train_reliability_head_only: path to reliability_finetune.json from step 3')
     parser.add_argument('--reliability_finetune_valid_data', type=str, default='', help='Optional for --train_reliability_head_only: path to reliability_finetune_valid.json from step 3')
+    parser.add_argument('--reliability_binary', action='store_true', default=False, help='Reliability head as binary classifier (positive=r=1.0, negative=otherwise) instead of 4-class. Changes head output dim, loss, and monitor metric to val/reliability_pos_f1.')
     parser = Blip2Stage2.add_model_specific_args(parser)
     parser = Stage2DM.add_model_specific_args(parser)
     args = parser.parse_args()
