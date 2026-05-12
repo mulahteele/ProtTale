@@ -1,4 +1,12 @@
-# ProtTale
+<div align="center">
+
+<img src="assets/prottale_logo.png" alt="ProtTale" width="700"/>
+
+[![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b?style=plastic&logo=arxiv&logoColor=white)](#)
+[![Model](https://img.shields.io/badge/🤗_Model-HuggingFace-FFD21E?style=plastic)](https://huggingface.co/Mulah/ProtTale)
+[![Demo](https://img.shields.io/badge/🤗_Demo-Spaces-FFD21E?style=plastic)](https://huggingface.co/spaces/Mulah/ProtTale-demo)
+
+</div>
 
 ProtTale is a multi-stage framework that maps a protein amino-acid sequence to a Swiss-Prot-style function description, together with a reliability score for the generated text. The pipeline has three training stages:
 
